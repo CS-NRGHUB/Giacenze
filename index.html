@@ -383,9 +383,9 @@ hr.divider { border:none; border-top:1px solid var(--border); margin:20px 0; }
     <div class="card" id="screen-login">
       <p class="section-label">Rivenditori Esterni — Accedi</p>
       <div class="field-wrap">
-        <label class="field-label">Username</label>
-        <input type="text" id="input-username" placeholder="Il tuo username"
-               autocomplete="username" autocapitalize="none"
+        <label class="field-label">Email</label>
+        <input type="email" id="input-username" placeholder="La tua email"
+               autocomplete="email" autocapitalize="none" inputmode="email"
                onkeydown="if(event.key==='Enter') document.getElementById('input-password').focus()">
       </div>
       <div class="field-wrap">
@@ -406,7 +406,15 @@ hr.divider { border:none; border-top:1px solid var(--border); margin:20px 0; }
         <div class="error-msg" id="login-error">Username o password errati. Riprova.</div>
       </div>
       <button class="primary-btn" id="login-btn" onclick="doLogin()">Accedi</button>
-      <div class="back-link" style="margin-top:14px">
+      <div style="text-align:center;margin-top:12px">
+        <button type="button" onclick="doForgotPassword()"
+                style="background:none;border:none;cursor:pointer;
+                       font-family:var(--font);font-size:13px;
+                       color:var(--blue);text-decoration:underline;padding:4px 0;">
+          Password dimenticata?
+        </button>
+      </div>
+      <div class="back-link" style="margin-top:10px">
         <button onclick="showChoice()">← Torna alla scelta accesso</button>
       </div>
     </div>
@@ -465,6 +473,8 @@ hr.divider { border:none; border-top:1px solid var(--border); margin:20px 0; }
 import { initializeApp }   from "https://www.gstatic.com/firebasejs/11.0.0/firebase-app.js";
 import { getFirestore, doc, getDoc, setDoc, collection, getDocs, query, where }
   from "https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js";
+import { getAuth, signInWithEmailAndPassword, sendPasswordResetEmail }
+  from "https://www.gstatic.com/firebasejs/11.0.0/firebase-auth.js";
 
 const firebaseConfig = {
   apiKey:            "AIzaSyASjRaaelkbhXBSgHdvMrmIhyF5duHk_tI",
@@ -485,6 +495,7 @@ const TODAY       = new Date().toISOString().slice(0,10);
 
 const app = initializeApp(firebaseConfig);
 const db  = getFirestore(app);
+const auth = getAuth(app);
 
 // ── STATO SESSIONE ────────────────────────────────────────────────────────────
 let catalog   = {};
@@ -589,50 +600,79 @@ function checkPin() {
 
 // ── LOGIN RIVENDITORI ─────────────────────────────────────────────────────────
 window.doLogin = async () => {
-  const uname = document.getElementById('input-username').value.trim();
+  const email = document.getElementById('input-username').value.trim().toLowerCase();
   const pwd   = document.getElementById('input-password').value;
   const btn   = document.getElementById('login-btn');
   const err   = document.getElementById('login-error');
 
-  if (!uname || !pwd) { err.textContent='Inserisci username e password.'; err.classList.add('show'); return; }
+  if (!email || !pwd) { err.textContent='Inserisci email e password.'; err.classList.add('show'); return; }
 
   btn.disabled=true; btn.textContent='Accesso in corso...';
   err.classList.remove('show');
 
   try {
-    // Cerca utente in Firestore: collection 'utenti', document = username
-    const snap = await getDoc(doc(db,'Utenti',uname));
-    if (!snap.exists()) throw new Error('not_found');
-    const utente = snap.data();
-    // Supporta sia maiuscola che minuscola nei nomi campo
-    const pwdSaved  = utente.password  ?? utente.Password  ?? '';
-    const nomeSaved = utente.nome      ?? utente.Nome      ?? uname;
-    const attivoVal = utente.attivo    ?? utente.Attivo    ?? true;
-    if (pwdSaved !== pwd) throw new Error('wrong_pwd');
-    if (attivoVal === false) throw new Error('disabled');
+    // Autenticazione tramite Firebase Authentication
+    const userCred = await signInWithEmailAndPassword(auth, email, pwd);
+    const firebaseUser = userCred.user;
 
-    // Salva sessione in localStorage (persiste al refresh)
-    username = uname;
-    const scontoVal = utente.sconto || utente.Sconto || 0;
+    // Legge nome e sconto da Firestore (document ID = email)
+    let nomeSaved = email, scontoVal = 0;
+    try {
+      const snap = await getDoc(doc(db, 'Utenti', email));
+      if (snap.exists()) {
+        nomeSaved = snap.data().nome ?? snap.data().Nome ?? email;
+        scontoVal = snap.data().sconto ?? snap.data().Sconto ?? 0;
+      }
+    } catch(e) { console.warn('Profilo utente non letto:', e); }
 
-    // Leggi contatore da Firestore (primo accesso del giorno)
+    // Leggi contatore del giorno da Firestore
+    username = email;
     let savedCount = 0;
     try {
-      const cSnap = await getDoc(doc(db, 'contatori', uname + '_' + TODAY));
+      const cKey = email.replace(/[@.]/g, '_') + '_' + TODAY;
+      const cSnap = await getDoc(doc(db, 'contatori', cKey));
       if (cSnap.exists()) savedCount = cSnap.data().count || 0;
-    } catch(e) { console.warn('Firestore read failed:', e); }
+    } catch(e) { console.warn('Contatore non letto:', e); }
 
-    // Salva sessione con count incluso — unica fonte di verità per il browser
-    const sessObj = { uname, nome: nomeSaved, sconto: scontoVal, date: TODAY, count: savedCount };
+    // Salva sessione locale
+    const sessObj = { uname: email, nome: nomeSaved, sconto: scontoVal, date: TODAY, count: savedCount };
     localStorage.setItem('ext_session', JSON.stringify(sessObj));
 
     enterSearch('ext', nomeSaved, MAX_EXT, savedCount, scontoVal);
   } catch(e) {
-    const msg = e.message==='disabled'
-      ? 'Account disabilitato. Contatta IBS.' : 'Username o password errati.';
+    const code = e.code || '';
+    const msg = code === 'auth/user-disabled'
+      ? 'Account disabilitato. Contatta IBS.'
+      : code === 'auth/too-many-requests'
+      ? 'Troppi tentativi. Riprova tra qualche minuto.'
+      : 'Email o password errati.';
     err.textContent = msg; err.classList.add('show');
   } finally {
     btn.disabled=false; btn.textContent='Accedi';
+  }
+};
+
+// ── RESET PASSWORD ────────────────────────────────────────────────────────────
+window.doForgotPassword = async () => {
+  const email = document.getElementById('input-username').value.trim().toLowerCase();
+  const err   = document.getElementById('login-error');
+  err.classList.remove('show');
+
+  if (!email) {
+    err.textContent = 'Inserisci la tua email nel campo qui sopra, poi clicca "Password dimenticata?".';
+    err.classList.add('show');
+    document.getElementById('input-username').focus();
+    return;
+  }
+  try {
+    await sendPasswordResetEmail(auth, email);
+    err.style.cssText = 'color:var(--green);background:var(--green-bg);border-color:var(--green-bdr)';
+    err.textContent = `✓ Email di reset inviata a ${email}. Controlla la posta (anche lo spam).`;
+    err.classList.add('show');
+  } catch(e) {
+    err.style.cssText = '';
+    err.textContent = 'Errore nell\'invio: verifica che l\'email sia corretta.';
+    err.classList.add('show');
   }
 };
 
@@ -720,9 +760,10 @@ window.doSearch = async () => {
         sess.count = reqCount;
         localStorage.setItem('ext_session', JSON.stringify(sess));
       } catch(e) { console.warn('localStorage write failed:', e); }
-      // Salva anche su Firestore in background (cross-device)
+      // Salva anche su Firestore in background (chiave: email sanitizzata)
+      const cKey = username.replace(/[@.]/g, '_') + '_' + TODAY;
       setDoc(
-        doc(db, 'contatori', username + '_' + TODAY),
+        doc(db, 'contatori', cKey),
         { count: reqCount, utente: username, data: TODAY },
         { merge: true }
       ).catch(e => console.warn('Firestore counter write failed:', e));
