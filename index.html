@@ -531,7 +531,19 @@ window.showChoice = () => { show('screen-choice'); pinBuf=''; updateDots(); };
 window.showPin = () => {
   if (!checkAutoLogin()) show('screen-pin');
 };
-window.showLogin  = () => { show('screen-login'); setTimeout(()=>document.getElementById('input-username').focus(),100); };
+window.showLogin = () => {
+  // Controlla se sessione ext già attiva oggi
+  try {
+    const sess = JSON.parse(localStorage.getItem('ext_session') || 'null');
+    if (sess && sess.date === TODAY) {
+      username = sess.uname;
+      enterSearch('ext', sess.nome, MAX_EXT, sess.count || 0, sess.sconto || 0);
+      return;
+    }
+  } catch(e) {}
+  show('screen-login');
+  setTimeout(() => document.getElementById('input-username').focus(), 100);
+};
 
 function enterSearch(type, uname, max, savedCount, sconto) {
   userType = type; username = uname; maxReq = max;
@@ -599,30 +611,22 @@ window.doLogin = async () => {
     if (pwdSaved !== pwd) throw new Error('wrong_pwd');
     if (attivoVal === false) throw new Error('disabled');
 
-    // Contatore richieste: localStorage (stesso browser) + Firestore (cross-device)
+    // Salva sessione in localStorage (persiste al refresh)
     username = uname;
-    const counterKey = 'ext_cnt_' + uname + '_' + TODAY;
-    let savedCount = 0;
+    const scontoVal = utente.sconto || utente.Sconto || 0;
 
-    // 1. Legge da Firestore (fonte primaria, cross-device)
+    // Leggi contatore da Firestore (primo accesso del giorno)
+    let savedCount = 0;
     try {
       const cSnap = await getDoc(doc(db, 'contatori', uname + '_' + TODAY));
-      if (cSnap.exists()) {
-        savedCount = cSnap.data().count || 0;
-        // Aggiorna localStorage con valore Firestore (più aggiornato)
-        localStorage.setItem(counterKey, String(savedCount));
-      } else {
-        // Nessun documento Firestore: usa localStorage se disponibile
-        const lsVal = parseInt(localStorage.getItem(counterKey) || '0');
-        savedCount = lsVal;
-      }
-    } catch(e) {
-      // Firestore non raggiungibile: fallback su localStorage
-      console.warn('Firestore non disponibile, uso localStorage:', e);
-      savedCount = parseInt(localStorage.getItem(counterKey) || '0');
-    }
+      if (cSnap.exists()) savedCount = cSnap.data().count || 0;
+    } catch(e) { console.warn('Firestore read failed:', e); }
 
-    enterSearch('ext', nomeSaved, MAX_EXT, savedCount, utente.sconto || utente.Sconto || 0);
+    // Salva sessione con count incluso — unica fonte di verità per il browser
+    const sessObj = { uname, nome: nomeSaved, sconto: scontoVal, date: TODAY, count: savedCount };
+    localStorage.setItem('ext_session', JSON.stringify(sessObj));
+
+    enterSearch('ext', nomeSaved, MAX_EXT, savedCount, scontoVal);
   } catch(e) {
     const msg = e.message==='disabled'
       ? 'Account disabilitato. Contatta IBS.' : 'Username o password errati.';
@@ -710,9 +714,12 @@ window.doSearch = async () => {
     // Salva contatore
     reqCount++;
     if (userType === 'ext') {
-      const counterKey = 'ext_cnt_' + username + '_' + TODAY;
-      // Salva subito su localStorage (sync, affidabile per stesso browser)
-      localStorage.setItem(counterKey, String(reqCount));
+      // Aggiorna count dentro ext_session (unica fonte di verità)
+      try {
+        const sess = JSON.parse(localStorage.getItem('ext_session') || '{}');
+        sess.count = reqCount;
+        localStorage.setItem('ext_session', JSON.stringify(sess));
+      } catch(e) { console.warn('localStorage write failed:', e); }
       // Salva anche su Firestore in background (cross-device)
       setDoc(
         doc(db, 'contatori', username + '_' + TODAY),
